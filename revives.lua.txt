@@ -7,7 +7,7 @@
 local Players = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TextChatService = game:GetService("TextChatService")
+local HttpService = game:GetService("HttpService")
 local VirtualInputManager = Instance.new("VirtualInputManager")
 
 --// Remotes
@@ -32,52 +32,31 @@ local PacketPrefix = "ReviveDupe_"
 --// Dupe State stuff
 local IsOtherAccountInitialized = false
 local IsGiftingRevive = false
-
---// Communication (Thank you vynixu for this textchatservice method :steamhappy:)
-local Communication = TextChatService.TextChannels.RBXGeneral
+local PacketAttribute = "DupeSyncPacket"
 
 local function SendPacket(PacketName)
-    local PacketData = `{PacketPrefix}{PacketName}`
-    Communication:SendAsync("", PacketData)
-    return PacketData
+    -- Use a timestamp so the attribute always "changes" even if the packet name is the same
+    LocalPlayer:SetAttribute(PacketAttribute, PacketName .. ":" .. tostring(tick()))
 end
 
-TextChatService.MessageReceived:Connect(function(message: TextChatMessage)
-    local packetData = message.Metadata
-    local textSource = message.TextSource
-
-    if
-        not packetData or not textSource or
-        packetData:sub(1, #PacketPrefix) ~= PacketPrefix or
-        textSource.UserId == LocalPlayer.UserId
-    then
-        return
-    end
-    
-    local sender = Players:GetPlayerByUserId(textSource.UserId)
-    local packetName = packetData:sub(#PacketPrefix + 1)
+local function HandlePacket(sender, packetRaw)
+    if not packetRaw then return end
+    local packetName = string.split(packetRaw, ":")[1]
 
     if packetName == "Init" then
-        if IsOtherAccountInitialized then
-            return
-        end
-
+        if IsOtherAccountInitialized then return end
         IsOtherAccountInitialized = true
         OtherPlayer = sender
-        
-        -- Replicate to other client that this account has been initialized
-        SendPacket("Init")
 
+        SendPacket("Init") -- Respond back
         StarterGui:SetCore("SendNotification", {
             Title = Title,
             Text = `{sender.Name} initialized, starting dupe process...`,
             Duration = 5
         })
     end
-    
-    if not IsOtherAccountInitialized then
-        return
-    end
+
+    if not IsOtherAccountInitialized then return end
 
     if packetName == "SendReviveStandardToMe" then
         IsGiftingRevive = true
@@ -88,7 +67,6 @@ TextChatService.MessageReceived:Connect(function(message: TextChatMessage)
                 Text = "Waiting for the other account to die...",
                 Duration = 5
             })
-
             OtherPlayer:GetAttributeChangedSignal("Alive"):Wait()
         end
 
@@ -101,7 +79,26 @@ TextChatService.MessageReceived:Connect(function(message: TextChatMessage)
             Duration = 5
         })
     end
+end
+
+-- Listen for packets from other players
+Players.PlayerAdded:Connect(function(player)
+    player.AttributeChanged:Connect(function(attr)
+        if attr == PacketAttribute then
+            HandlePacket(player, player:GetAttribute(PacketAttribute))
+        end
+    end)
 end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        player.AttributeChanged:Connect(function(attr)
+            if attr == PacketAttribute then
+                HandlePacket(player, player:GetAttribute(PacketAttribute))
+            end
+        end)
+    end
+end
 
 --// Send a message to the other account to initialize
 SendPacket("Init")
