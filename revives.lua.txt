@@ -1,0 +1,306 @@
+--// Revive Duper Script (HTTP communication) – works when chat & ReplicatedStorage are blocked
+--// Original by upio, method by lolcat, HTTP adaptation
+
+--// Services
+local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local VirtualInputManager = Instance.new("VirtualInputManager")
+
+--// Remotes (adjust paths if needed)
+local RemotesFolder = ReplicatedStorage:FindFirstChild("RemotesFolder") or ReplicatedStorage
+local ReviveFriendEvent = RemotesFolder:FindFirstChild("ReviveFriend")
+local ObtainReviveEvent = RemotesFolder:FindFirstChild("ObtainGiftedRevive")
+
+--// Player Variables
+local LocalPlayer = Players.LocalPlayer
+local OtherPlayer
+
+--// Game Data
+local LatestRoom = ReplicatedStorage:FindFirstChild("GameData") and ReplicatedStorage.GameData:FindFirstChild("LatestRoom")
+local Revives = LocalPlayer.PlayerGui:FindFirstChild("TopbarUI") and 
+                LocalPlayer.PlayerGui.TopbarUI.Topbar.StatsTopbarHandler.StatModules.Revives.RevivesVal
+
+--// ========== CONFIGURATION ==========
+local AccountToDuplicateTo = "AltAccountName"   -- CHANGE THIS
+local DuplicationAmount = 1000                  -- how many revives to dupe
+local IsMainAccount = LocalPlayer.Name == AccountToDuplicateTo
+local Title = IsMainAccount and "Revive Dupe Helper (Main)" or "Revive Dupe Helper (Alt)"
+local PacketPrefix = "ReviveDupe_"
+
+--// ========== HTTP COMMUNICATION SETUP ==========
+-- We'll use npoint.io – free, no API key, just create a document.
+
+local SessionID = game.JobId .. "_" .. (IsMainAccount and "main" or "alt")
+local DocumentURL = nil  -- will be set after creation
+local lastMessageCount = 0
+local messages = {}      -- stored messages from the document
+
+-- Create a new document or reuse an existing one (store ID in a global)
+local function GetOrCreateDocument()
+    -- Try to load from a saved ID (you can hardcode one for testing)
+    local savedID = "your_fixed_document_id_here"  -- OPTIONAL: replace with a fixed ID to reuse
+    if savedID ~= "your_fixed_document_id_here" then
+        return savedID
+    end
+    
+    -- Otherwise create a new document
+    local initData = { messages = {} }
+    local body = HttpService:JSONEncode(initData)
+    local success, response = pcall(function()
+        return HttpService:PostAsync("https://api.npoint.io/documents", body, Enum.HttpContentType.ApplicationJson)
+    end)
+    if not success then error("Failed to create document: " .. tostring(response)) end
+    local result = HttpService:JSONDecode(response)
+    return result.id
+end
+
+local DocID = GetOrCreateDocument()
+local ReadURL = "https://api.npoint.io/" .. DocID
+local WriteURL = ReadURL
+
+-- Send a packet (append to the document's message array)
+local function SendPacket(packetName)
+    local packetData = PacketPrefix .. packetName
+    -- Read current document, add new message, write back
+    local success, current = pcall(function()
+        return HttpService:GetAsync(ReadURL)
+    end)
+    if not success then return end
+    
+    local data = HttpService:JSONDecode(current)
+    data.messages = data.messages or {}
+    table.insert(data.messages, {
+        sender = LocalPlayer.UserId,
+        packet = packetData,
+        time = os.time()
+    })
+    -- Keep only last 30 messages to avoid bloat
+    if #data.messages > 30 then
+        for i = 1, #data.messages - 30 do table.remove(data.messages, 1) end
+    end
+    local newBody = HttpService:JSONEncode(data)
+    pcall(function()
+        HttpService:PostAsync(WriteURL, newBody, Enum.HttpContentType.ApplicationJson)
+    end)
+end
+
+-- Poll for new messages (run in background)
+local function startPolling()
+    task.spawn(function()
+        while true do
+            task.wait(0.3)  -- fast enough for coordination
+            local success, response = pcall(function()
+                return HttpService:GetAsync(ReadURL)
+            end)
+            if not success then continue end
+            
+            local data = HttpService:JSONDecode(response)
+            if not data.messages then continue end
+            
+            -- Process new messages
+            if #data.messages > lastMessageCount then
+                for i = lastMessageCount + 1, #data.messages do
+                    local msg = data.messages[i]
+                    if msg.sender ~= LocalPlayer.UserId then
+                        local packet = msg.packet
+                        if packet:sub(1, #PacketPrefix) == PacketPrefix then
+                            local packetName = packet:sub(#PacketPrefix + 1)
+                            local sender = Players:GetPlayerByUserId(msg.sender)
+                            if not sender then 
+                                -- Could be a player not in server yet, but we store name?
+                                -- For simplicity, we assume both accounts are in same server.
+                                -- If sender not found, we can still process using UserId.
+                                -- But we need OtherPlayer for later. We'll handle below.
+                            end
+                            
+                            -- Process packets (same logic as original)
+                            if packetName == "Init" then
+                                if IsOtherAccountInitialized then return end
+                                IsOtherAccountInitialized = true
+                                if sender then
+                                    OtherPlayer = sender
+                                else
+                                    -- If sender not found, try to find by UserId
+                                    OtherPlayer = Players:GetPlayerByUserId(msg.sender)
+                                end
+                                SendPacket("Init")  -- acknowledge
+                                StarterGui:SetCore("SendNotification", {
+                                    Title = Title,
+                                    Text = (OtherPlayer and OtherPlayer.Name or "Other account") .. " initialized, starting dupe...",
+                                    Duration = 5
+                                })
+                            end
+                            
+                            if not IsOtherAccountInitialized then return end
+                            
+                            if packetName == "SendReviveStandardToMe" then
+                                IsGiftingRevive = true
+                                if OtherPlayer and OtherPlayer:GetAttribute("Alive") == true then
+                                    StarterGui:SetCore("SendNotification", {
+                                        Title = Title,
+                                        Text = "Waiting for the other account to die...",
+                                        Duration = 5
+                                    })
+                                    OtherPlayer:GetAttributeChangedSignal("Alive"):Wait()
+                                end
+                                task.wait(2.5)
+                                if ReviveFriendEvent then
+                                    ReviveFriendEvent:FireServer(OtherPlayer.Name)
+                                end
+                                StarterGui:SetCore("SendNotification", {
+                                    Title = Title,
+                                    Text = "Revive sent to alt account. Now rejoin a new game with your alt account.",
+                                    Duration = 5
+                                })
+                            end
+                        end
+                    end
+                end
+                lastMessageCount = #data.messages
+            end
+        end
+    end)
+end
+
+--// Dupe State
+local IsOtherAccountInitialized = false
+local IsGiftingRevive = false
+
+--// Start polling and send initial handshake
+startPolling()
+SendPacket("Init")
+
+StarterGui:SetCore("SendNotification", {
+    Title = Title,
+    Text = "Waiting for other account to initialize via HTTP...",
+    Duration = 5
+})
+
+-- Wait for handshake
+repeat task.wait() until IsOtherAccountInitialized
+
+--// Helper Functions (same as original)
+local function AttemptToKillLocalPlayer()
+    if LatestRoom and LatestRoom.Value == 0 then
+        StarterGui:SetCore("SendNotification", {
+            Title = Title,
+            Text = "Please open a door",
+            Duration = 5
+        })
+        if LatestRoom then LatestRoom:GetPropertyChangedSignal("Value"):Wait() end
+    end
+    
+    if replicatesignal then
+        replicatesignal(LocalPlayer.Kill)
+    else
+        StarterGui:SetCore("SendNotification", {
+            Title = Title,
+            Text = "Your executor does not support replicatesignal, please die manually",
+            Duration = 5
+        })
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+            LocalPlayer.Character.Humanoid.Died:Wait()
+        end
+    end
+    
+    StarterGui:SetCore("SendNotification", {
+        Title = Title,
+        Text = "Make your alt account try and revive you. (Click more than once)",
+        Duration = 5
+    })
+end
+
+--// Main Logic
+if Revives and Revives.Value == 0 and not IsMainAccount then
+    SendPacket("SendReviveStandardToMe")
+    IsGiftingRevive = true
+    AttemptToKillLocalPlayer()
+    
+    StarterGui:SetCore("SendNotification", {
+        Title = Title,
+        Text = "Waiting for the other account to gift you a revive...",
+        Duration = 5
+    })
+    
+    local AcceptReviveThread = task.spawn(function()
+        while task.wait() do
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        end
+    end)
+    
+    if Revives then Revives:GetPropertyChangedSignal("Value"):Wait() end
+    coroutine.close(AcceptReviveThread)
+    task.wait(0.05)
+    game:Shutdown()
+    return
+end
+
+StarterGui:SetCore("SendNotification", {
+    Title = Title,
+    Text = "Waiting 5 seconds for communication to stabilize...",
+    Duration = 5
+})
+task.wait(5)
+
+if IsGiftingRevive then return end
+
+if IsMainAccount then
+    local ReviveObtainedAmount = 0
+    local function OnObtainRevive(...)
+        ReviveObtainedAmount = ReviveObtainedAmount + 1
+        if ReviveObtainedAmount > (DuplicationCount * 0.85) then return true end
+        task.wait(9e9)
+        return true
+    end
+    
+    if hookmetamethod then
+        local mtHook; mtHook = hookmetamethod(game, "__newindex", function(self, key, value)
+            if rawequal(self, ObtainReviveEvent) and key == "OnClientInvoke" then
+                if not checkcaller() then return end
+            end
+            return mtHook(self, key, value)
+        end)
+    else
+        task.defer(function()
+            while task.wait() do
+                if ObtainReviveEvent then ObtainReviveEvent.OnClientInvoke = OnObtainRevive end
+            end
+        end)
+    end
+    if ObtainReviveEvent then ObtainReviveEvent.OnClientInvoke = OnObtainRevive end
+    
+    AttemptToKillLocalPlayer()
+else
+    -- Alt account
+    if OtherPlayer and OtherPlayer:GetAttribute("Alive") then
+        StarterGui:SetCore("SendNotification", {
+            Title = Title,
+            Text = "Waiting for the other account to die...",
+            Duration = 5
+        })
+        OtherPlayer:GetAttributeChangedSignal("Alive"):Wait()
+    end
+    
+    for i = 1, 5 do
+        StarterGui:SetCore("SendNotification", {
+            Title = Title,
+            Text = string.format("Duping in %d seconds...", 6 - i),
+            Duration = 1
+        })
+        task.wait(1)
+    end
+    
+    for i = 1, DuplicationAmount do
+        if ReviveFriendEvent then
+            ReviveFriendEvent:FireServer(OtherPlayer.Name)
+        end
+    end
+    
+    StarterGui:SetCore("SendNotification", {
+        Title = Title,
+        Text = "Duping completed!",
+        Duration = 5
+    })
+end
