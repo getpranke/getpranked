@@ -1,6 +1,3 @@
--- [PAUSED AT LOADSTRING]
--- Chunk Name: nil
-
 Players = game:GetService("Players")
 LocalPlayer = Players.LocalPlayer
 Lighting = game:GetService("Lighting")
